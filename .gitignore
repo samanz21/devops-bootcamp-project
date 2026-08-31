@@ -96,4 +96,5 @@ terraform.rc
 
 inventory.ini
 
+.kilo/
 notes/

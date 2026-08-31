@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-controller.sh — fully automated phase 2a setup (run from laptop)
+# setup-controller.sh — fully automated phase 2a + 2b setup (run from laptop)
 #
 # Usage:   bash setup-controller.sh
 # Requires: terraform/ applied, ansible/ terraform applied, aws CLI + SSM plugin
@@ -11,10 +11,13 @@
 #   3. Installs Ansible on the controller
 #   4. Generates SSH key on the controller
 #   5. Distributes the public key to web & monitoring
-#   6. Copies all ansible files to the controller
+#   6. Copies all ansible + grafana files to the controller
 #   7. Installs geerlingguy.docker role + community.docker collection
 #   8. Runs playbook-connectivity.yaml (connectivity test)
 #   9. Runs playbook-docker.yaml (install Docker on web & monitoring)
+#  10. Installs prometheus.prometheus.node_exporter role
+#  11. Runs playbook-node-exporter.yaml (install node_exporter on web)
+#  12. Runs playbook-monitoring.yaml (deploy Prometheus + Grafana stack)
 #
 # On re-deploy (terraform destroy + apply), just run this script again.
 # ==============================================================================
@@ -83,7 +86,11 @@ CONN_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-connectivity.yaml")
 DOCKER_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-docker.yaml")
 WEB_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-web.yaml")
 REQ_B64=$(base64 -w0 "$SCRIPT_DIR/requirements.yml")
-CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu mkdir -p /home/ubuntu/ansible\",\"echo $INV_B64 | base64 -d > /home/ubuntu/ansible/inventory.ini\",\"echo $CFG_B64 | base64 -d > /home/ubuntu/ansible/ansible.cfg\",\"echo $CONN_B64 | base64 -d > /home/ubuntu/ansible/playbook-connectivity.yaml\",\"echo $DOCKER_B64 | base64 -d > /home/ubuntu/ansible/playbook-docker.yaml\",\"echo $WEB_B64 | base64 -d > /home/ubuntu/ansible/playbook-web.yaml\",\"echo $REQ_B64 | base64 -d > /home/ubuntu/ansible/requirements.yml\",\"chown -R ubuntu:ubuntu /home/ubuntu/ansible\"]" --query 'Command.CommandId' --output text)
+MON_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-monitoring.yaml")
+NEXP_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-node-exporter.yaml")
+COMPOSE_B64=$(base64 -w0 "$SCRIPT_DIR/compose.yaml")
+PROM_B64=$(base64 -w0 "$SCRIPT_DIR/prometheus.yaml")
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu mkdir -p /home/ubuntu/ansible/grafana\",\"echo $INV_B64 | base64 -d > /home/ubuntu/ansible/inventory.ini\",\"echo $CFG_B64 | base64 -d > /home/ubuntu/ansible/ansible.cfg\",\"echo $CONN_B64 | base64 -d > /home/ubuntu/ansible/playbook-connectivity.yaml\",\"echo $DOCKER_B64 | base64 -d > /home/ubuntu/ansible/playbook-docker.yaml\",\"echo $WEB_B64 | base64 -d > /home/ubuntu/ansible/playbook-web.yaml\",\"echo $REQ_B64 | base64 -d > /home/ubuntu/ansible/requirements.yml\",\"echo $MON_B64 | base64 -d > /home/ubuntu/ansible/playbook-monitoring.yaml\",\"echo $NEXP_B64 | base64 -d > /home/ubuntu/ansible/playbook-node-exporter.yaml\",\"echo $COMPOSE_B64 | base64 -d > /home/ubuntu/ansible/grafana/compose.yaml\",\"echo $PROM_B64 | base64 -d > /home/ubuntu/ansible/grafana/prometheus.yaml\",\"chown -R ubuntu:ubuntu /home/ubuntu/ansible\"]" --query 'Command.CommandId' --output text)
 echo "  Command ID: $CMD_ID"
 while true; do
   STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
@@ -116,6 +123,34 @@ done
 echo ""
 echo "=== Installing Docker on web & monitoring (playbook-docker.yaml) ==="
 CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-docker.yaml"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+sleep 15
+RESULT=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query '{Status:Status,Output:StandardOutputContent}' --output json)
+echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
+
+echo ""
+echo "=== Installing prometheus.prometheus.node_exporter role ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-galaxy role install prometheus.prometheus.node_exporter"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: role install failed" && exit 1
+  sleep 10
+done
+
+echo ""
+echo "=== Installing node_exporter on web server (playbook-node-exporter.yaml) ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-node-exporter.yaml"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+sleep 15
+RESULT=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query '{Status:Status,Output:StandardOutputContent}' --output json)
+echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
+
+echo ""
+echo "=== Deploying Prometheus & Grafana (playbook-monitoring.yaml) ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-monitoring.yaml"]' --query 'Command.CommandId' --output text)
 echo "  Command ID: $CMD_ID"
 sleep 15
 RESULT=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query '{Status:Status,Output:StandardOutputContent}' --output json)

@@ -1,0 +1,23 @@
+- name: Deploy Prometheus & Grafana on monitoring server
+  hosts: monitoring
+  become: yes
+  tasks:
+    - name: Create monitoring directory
+      file:
+        path: /opt/monitoring
+        state: directory
+
+    - name: Copy prometheus.yaml
+      copy:
+        src: grafana/prometheus.yaml
+        dest: /opt/monitoring/prometheus.yaml
+
+    - name: Copy compose.yaml
+      copy:
+        src: grafana/compose.yaml
+        dest: /opt/monitoring/compose.yaml
+
+    - name: Start monitoring stack
+      command: docker compose up -d
+      args:
+        chdir: /opt/monitoring

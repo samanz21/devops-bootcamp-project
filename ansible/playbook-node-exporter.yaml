@@ -1,0 +1,5 @@
+- name: Install node_exporter on web server
+  hosts: web
+  become: yes
+  roles:
+    - prometheus.prometheus.node_exporter

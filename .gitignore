@@ -96,5 +96,8 @@ terraform.rc
 
 inventory.ini
 
+# Cloned app source (Infratify/ship) — keep out of repo, only Dockerfile is tracked
+app/ship-app/
+
 .kilo/
 notes/

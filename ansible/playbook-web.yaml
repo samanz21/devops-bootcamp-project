@@ -1,0 +1,44 @@
+- name: Deploy app container on web server
+  hosts: web
+  become: yes
+  vars:
+    ecr_registry: "641379499267.dkr.ecr.ap-southeast-1.amazonaws.com"
+    ecr_repo: "devops-ship-app"
+    image_tag: latest
+  tasks:
+    - name: Install pip
+      apt:
+        name: python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Install awscli
+      pip:
+        name: awscli
+        state: present
+        extra_args: --break-system-packages
+
+    - name: Log in to ECR
+      shell: >
+        aws ecr get-login-password --region ap-southeast-1
+        | docker login --username AWS --password-stdin {{ ecr_registry }}
+      changed_when: false
+
+    - name: Pull image from ECR
+      community.docker.docker_image:
+        name: "{{ ecr_registry }}/{{ ecr_repo }}:{{ image_tag }}"
+        source: pull
+
+    - name: Ensure old container is removed
+      community.docker.docker_container:
+        name: ship-app
+        state: absent
+
+    - name: Run app container
+      community.docker.docker_container:
+        name: ship-app
+        image: "{{ ecr_registry }}/{{ ecr_repo }}:{{ image_tag }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "80:80"

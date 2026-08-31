@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-controller.sh — fully automated controller setup (run from laptop)
+# setup-controller.sh — fully automated phase 2a setup (run from laptop)
 #
 # Usage:   bash setup-controller.sh
 # Requires: terraform/ applied, ansible/ terraform applied, aws CLI + SSM plugin
@@ -11,8 +11,10 @@
 #   3. Installs Ansible on the controller
 #   4. Generates SSH key on the controller
 #   5. Distributes the public key to web & monitoring
-#   6. Copies inventory, ansible.cfg, playbook to the controller
-#   7. Runs playbook-connectivity.yaml
+#   6. Copies all ansible files to the controller
+#   7. Installs geerlingguy.docker role + community.docker collection
+#   8. Runs playbook-connectivity.yaml (connectivity test)
+#   9. Runs playbook-docker.yaml (install Docker on web & monitoring)
 #
 # On re-deploy (terraform destroy + apply), just run this script again.
 # ==============================================================================
@@ -77,8 +79,11 @@ echo "=== Copying ansible files to controller ==="
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INV_B64=$(base64 -w0 "$SCRIPT_DIR/inventory.ini")
 CFG_B64=$(base64 -w0 "$SCRIPT_DIR/ansible.cfg")
-PB_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-connectivity.yaml")
-CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu mkdir -p /home/ubuntu/ansible\",\"echo $INV_B64 | base64 -d > /home/ubuntu/ansible/inventory.ini\",\"echo $CFG_B64 | base64 -d > /home/ubuntu/ansible/ansible.cfg\",\"echo $PB_B64 | base64 -d > /home/ubuntu/ansible/playbook-connectivity.yaml\",\"chown -R ubuntu:ubuntu /home/ubuntu/ansible\"]" --query 'Command.CommandId' --output text)
+CONN_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-connectivity.yaml")
+DOCKER_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-docker.yaml")
+WEB_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-web.yaml")
+REQ_B64=$(base64 -w0 "$SCRIPT_DIR/requirements.yml")
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu mkdir -p /home/ubuntu/ansible\",\"echo $INV_B64 | base64 -d > /home/ubuntu/ansible/inventory.ini\",\"echo $CFG_B64 | base64 -d > /home/ubuntu/ansible/ansible.cfg\",\"echo $CONN_B64 | base64 -d > /home/ubuntu/ansible/playbook-connectivity.yaml\",\"echo $DOCKER_B64 | base64 -d > /home/ubuntu/ansible/playbook-docker.yaml\",\"echo $WEB_B64 | base64 -d > /home/ubuntu/ansible/playbook-web.yaml\",\"echo $REQ_B64 | base64 -d > /home/ubuntu/ansible/requirements.yml\",\"chown -R ubuntu:ubuntu /home/ubuntu/ansible\"]" --query 'Command.CommandId' --output text)
 echo "  Command ID: $CMD_ID"
 while true; do
   STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
@@ -91,6 +96,26 @@ done
 echo ""
 echo "=== Running connectivity playbook ==="
 CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-connectivity.yaml"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+sleep 15
+RESULT=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query '{Status:Status,Output:StandardOutputContent}' --output json)
+echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
+
+echo ""
+echo "=== Installing geerlingguy.docker role + community.docker collection ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-galaxy role install -r /home/ubuntu/ansible/requirements.yml","sudo -u ubuntu ansible-galaxy collection install community.docker"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: role install failed" && exit 1
+  sleep 10
+done
+
+echo ""
+echo "=== Installing Docker on web & monitoring (playbook-docker.yaml) ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-docker.yaml"]' --query 'Command.CommandId' --output text)
 echo "  Command ID: $CMD_ID"
 sleep 15
 RESULT=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query '{Status:Status,Output:StandardOutputContent}' --output json)

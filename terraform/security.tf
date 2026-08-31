@@ -12,6 +12,12 @@ module "sg_public" {
       from_port   = 80
       to_port     = 80
     }
+    ssh_vpc = {
+      cidr_ipv4   = "10.0.0.0/24"
+      ip_protocol = "tcp"
+      from_port   = 22
+      to_port     = 22
+    }
   }
 
   egress_rules = {
@@ -35,8 +41,6 @@ module "sg_private" {
     vpc_internal = {
       cidr_ipv4   = "10.0.0.0/24"
       ip_protocol = "-1"
-      from_port   = 0
-      to_port     = 65535
     }
   }
 

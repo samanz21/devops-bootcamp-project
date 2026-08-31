@@ -1,0 +1,10 @@
+- name: Test controller connectivity to web & monitoring
+  hosts: servers
+  gather_facts: no
+  tasks:
+    - name: Ansible ping
+      ping:
+
+    - name: Show connection status
+      debug:
+        msg: "{{ inventory_hostname }} connected successfully"

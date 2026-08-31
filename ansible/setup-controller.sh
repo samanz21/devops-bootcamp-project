@@ -1,197 +1,100 @@
 #!/bin/bash
 # ==============================================================================
-# setup-controller.sh — reusable steps to prepare the Ansible controller
+# setup-controller.sh — fully automated controller setup (run from laptop)
 #
-# Run these commands ONE BY ONE after `terraform apply`.
-# Each step is independent — you can stop and resume anywhere.
+# Usage:   bash setup-controller.sh
+# Requires: terraform/ applied, ansible/ terraform applied, aws CLI + SSM plugin
 #
-# Prerequisites:
-#   - terraform/ applied (3 EC2 running)
-#   - ansible/ terraform applied (inventory.ini generated)
-#   - aws CLI configured, session-manager-plugin installed
+# What it does:
+#   1. Detects instance IDs automatically
+#   2. Waits for SSM Online on all 3 instances
+#   3. Installs Ansible on the controller
+#   4. Generates SSH key on the controller
+#   5. Distributes the public key to web & monitoring
+#   6. Copies inventory, ansible.cfg, playbook to the controller
+#   7. Runs playbook-connectivity.yaml
 #
-# Usage:
-#   Step 1: generate inventory from ansible/terraform
-#   Step 2: find instance IDs (SSM needs them)
-#   Step 3: install Ansible on the controller
-#   Step 4: generate SSH key on the controller
-#   Step 5: distribute the public key to web & monitoring
-#   Step 6: copy ansible files (inventory, playbook) to controller
-#   Step 7: run the connectivity test
+# On re-deploy (terraform destroy + apply), just run this script again.
 # ==============================================================================
 
-echo "=== Step 0: Get instance IDs ==="
-# Run this first so you have the IDs for subsequent commands.
-# These come from the terraform output after applying terraform/
-aws ec2 describe-instances \
-  --region ap-southeast-1 \
-  --filters "Name=tag:Name,Values=devops-ansible-controller" \
-  --query 'Reservations[0].Instances[0].InstanceId' \
-  --output text
+set -e
 
-aws ec2 describe-instances \
-  --region ap-southeast-1 \
-  --filters "Name=tag:Name,Values=devops-web-server" \
-  --query 'Reservations[0].Instances[0].InstanceId' \
-  --output text
-
-aws ec2 describe-instances \
-  --region ap-southeast-1 \
-  --filters "Name=tag:Name,Values=devops-monitoring-server" \
-  --query 'Reservations[0].Instances[0].InstanceId' \
-  --output text
-
-# After running, export the IDs:
-#   CTRL_ID=i-xxxx
-#   WEB_ID=i-xxxx
-#   MON_ID=i-xxxx
-
+REGION="ap-southeast-1"
+echo "=== Getting instance IDs ==="
+CTRL_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-ansible-controller" --query 'Reservations[0].Instances[0].InstanceId' --output text)
+WEB_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-web-server" --query 'Reservations[0].Instances[0].InstanceId' --output text)
+MON_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-monitoring-server" --query 'Reservations[0].Instances[0].InstanceId' --output text)
+echo "  Controller: $CTRL_ID"
+echo "  Web:        $WEB_ID"
+echo "  Monitoring: $MON_ID"
 
 echo ""
-echo "=== Step 1: Generate inventory.ini ==="
-cd /home/luqmansyakir/devops-bootcamp-project/ansible
-terraform init     # first time only
-terraform apply    # creates/updates ansible/inventory.ini
-cat inventory.ini  # verify the IPs are correct
-
-
-echo ""
-echo "=== Step 2: Verify SSM connectivity ==="
-aws ssm describe-instance-information \
-  --region ap-southeast-1 \
-  --filters "Key=InstanceIds,Values=$CTRL_ID,$WEB_ID,$MON_ID" \
-  --query 'InstanceInformationList[].{Id:InstanceId,Ping:PingStatus}' \
-  --output table
-# All three should show "Online". If not, wait ~2 min and retry.
-
+echo "=== Waiting for SSM Online on all instances ==="
+while true; do
+  STATUS=$(aws ssm describe-instance-information --region $REGION --filters "Key=InstanceIds,Values=$CTRL_ID,$WEB_ID,$MON_ID" --query 'InstanceInformationList[].PingStatus' --output text)
+  if echo "$STATUS" | grep -q "Online" && [ "$(echo "$STATUS" | grep -c Online)" -eq 3 ]; then
+    echo "  All instances Online"
+    break
+  fi
+  echo "  Waiting... (status: $STATUS)"
+  sleep 10
+done
 
 echo ""
-echo "=== Step 3: Install Ansible on controller ==="
-CMD_ID=$(aws ssm send-command \
-  --region ap-southeast-1 \
-  --instance-ids "$CTRL_ID" \
-  --document-name "AWS-RunShellScript" \
-  --parameters 'commands=[
-    "sudo apt-get update -y",
-    "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ansible"
-  ]' \
-  --query 'Command.CommandId' \
-  --output text)
-echo "Command ID: $CMD_ID"
-
-# Check status (repeat until Status=Success)
-aws ssm get-command-invocation \
-  --region ap-southeast-1 \
-  --command-id "$CMD_ID" \
-  --instance-id "$CTRL_ID" \
-  --query '{Status:Status,Output:StandardOutputContent}' \
-  --output json
-
+echo "=== Installing Ansible on controller ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo apt-get update -y","sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ansible"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: install failed" && exit 1
+  sleep 10
+done
 
 echo ""
-echo "=== Step 4: Generate SSH key on controller ==="
-CMD_ID=$(aws ssm send-command \
-  --region ap-southeast-1 \
-  --instance-ids "$CTRL_ID" \
-  --document-name "AWS-RunShellScript" \
-  --parameters 'commands=[
-    "sudo -u ubuntu mkdir -p /home/ubuntu/.ssh",
-    "sudo -u ubuntu ssh-keygen -t ed25519 -f /home/ubuntu/.ssh/id_ed25519 -N \"\" -q",
-    "sudo -u ubuntu cat /home/ubuntu/.ssh/id_ed25519.pub"
-  ]' \
-  --query 'Command.CommandId' \
-  --output text)
-echo "Command ID: $CMD_ID"
-
-# Wait ~5s, then check output to get the public key
-aws ssm get-command-invocation \
-  --region ap-southeast-1 \
-  --command-id "$CMD_ID" \
-  --instance-id "$CTRL_ID" \
-  --query 'StandardOutputContent' \
-  --output text
-
-# Copy the public key string (starts with ssh-ed25519 AAA...) into the next step
-
+echo "=== Generating SSH key on controller ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu mkdir -p /home/ubuntu/.ssh","sudo -u ubuntu ssh-keygen -t ed25519 -f /home/ubuntu/.ssh/id_ed25519 -N \"\" -q","sudo -u ubuntu cat /home/ubuntu/.ssh/id_ed25519.pub"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+sleep 5
+PUB_KEY=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'StandardOutputContent' --output text)
+echo "  Public key: $PUB_KEY"
 
 echo ""
-echo "=== Step 5: Add controller's SSH key to web & monitoring ==="
-# Replace YOUR_PUB_KEY with the key from Step 4 output
-CONTROLLER_PUB_KEY="ssh-ed25519 AAA... ubuntu@ip-10-0-0-135"
-
-aws ssm send-command \
-  --region ap-southeast-1 \
-  --instance-ids "$WEB_ID" "$MON_ID" \
-  --document-name "AWS-RunShellScript" \
-  --parameters 'commands=[
-    "sudo -u ubuntu mkdir -p /home/ubuntu/.ssh",
-    "echo "'"$CONTROLLER_PUB_KEY"'" >> /home/ubuntu/.ssh/authorized_keys",
-    "chmod 600 /home/ubuntu/.ssh/authorized_keys",
-    "sudo -u ubuntu cat /home/ubuntu/.ssh/authorized_keys"
-  ]' \
-  --query 'Command.CommandId' \
-  --output text
-
-# Wait ~5s, then verify the key was added on both targets
-
+echo "=== Distributing SSH key to web & monitoring ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$WEB_ID" "$MON_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu mkdir -p /home/ubuntu/.ssh\",\"echo '$PUB_KEY' >> /home/ubuntu/.ssh/authorized_keys\",\"chmod 600 /home/ubuntu/.ssh/authorized_keys\"]" --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$WEB_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: key distribution failed" && exit 1
+  sleep 5
+done
 
 echo ""
-echo "=== Step 6: Copy ansible files to controller ==="
-cd /home/luqmansyakir/devops-bootcamp-project/ansible
-
-# Base64-encode each file to avoid escape issues in SSM
-INV_B64=$(base64 -w0 inventory.ini)
-CFG_B64=$(base64 -w0 ansible.cfg)
-PB_B64=$(base64 -w0 playbook-connectivity.yaml)
-
-CMD_ID=$(aws ssm send-command \
-  --region ap-southeast-1 \
-  --instance-ids "$CTRL_ID" \
-  --document-name "AWS-RunShellScript" \
-  --parameters 'commands=[
-    "sudo -u ubuntu mkdir -p /home/ubuntu/ansible",
-    "echo "'"$INV_B64"'" | base64 -d > /home/ubuntu/ansible/inventory.ini",
-    "echo "'"$CFG_B64"'" | base64 -d > /home/ubuntu/ansible/ansible.cfg",
-    "echo "'"$PB_B64"'" | base64 -d > /home/ubuntu/ansible/playbook-connectivity.yaml",
-    "chown -R ubuntu:ubuntu /home/ubuntu/ansible",
-    "ls -la /home/ubuntu/ansible"
-  ]' \
-  --query 'Command.CommandId' \
-  --output text)
-
-# Check — should see 3 files (inventory.ini, ansible.cfg, playbook-connectivity.yaml)
-aws ssm get-command-invocation \
-  --region ap-southeast-1 \
-  --command-id "$CMD_ID" \
-  --instance-id "$CTRL_ID" \
-  --query '{Status:Status,Output:StandardOutputContent}' \
-  --output json
-
+echo "=== Copying ansible files to controller ==="
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INV_B64=$(base64 -w0 "$SCRIPT_DIR/inventory.ini")
+CFG_B64=$(base64 -w0 "$SCRIPT_DIR/ansible.cfg")
+PB_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-connectivity.yaml")
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu mkdir -p /home/ubuntu/ansible\",\"echo $INV_B64 | base64 -d > /home/ubuntu/ansible/inventory.ini\",\"echo $CFG_B64 | base64 -d > /home/ubuntu/ansible/ansible.cfg\",\"echo $PB_B64 | base64 -d > /home/ubuntu/ansible/playbook-connectivity.yaml\",\"chown -R ubuntu:ubuntu /home/ubuntu/ansible\"]" --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: file copy failed" && exit 1
+  sleep 5
+done
 
 echo ""
-echo "=== Step 7: Run connectivity test ==="
-CMD_ID=$(aws ssm send-command \
-  --region ap-southeast-1 \
-  --instance-ids "$CTRL_ID" \
-  --document-name "AWS-RunShellScript" \
-  --parameters 'commands=[
-    "sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-connectivity.yaml"
-  ]' \
-  --query 'Command.CommandId' \
-  --output text)
-
-# Wait ~15s for playbook to finish
+echo "=== Running connectivity playbook ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-connectivity.yaml"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
 sleep 15
+RESULT=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query '{Status:Status,Output:StandardOutputContent}' --output json)
+echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
 
-aws ssm get-command-invocation \
-  --region ap-southeast-1 \
-  --command-id "$CMD_ID" \
-  --instance-id "$CTRL_ID" \
-  --query '{Status:Status,Output:StandardOutputContent}' \
-  --output json
-
-# Expected result:
-#   web_node        : ok=2    failed=0
-#   monitoring_node : ok=2    failed=0
 echo ""
-echo "=== Done. Controller ready to manage servers ==="
+echo "=== DONE ==="

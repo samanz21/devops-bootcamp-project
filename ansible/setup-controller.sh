@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-controller.sh — fully automated phase 2a + 2b setup (run from laptop)
+# setup-controller.sh — hybrid approach: run after terraform apply
 #
 # Usage:   bash setup-controller.sh
 # Requires: terraform/ applied, ansible/ terraform applied, aws CLI + SSM plugin
@@ -8,16 +8,21 @@
 # What it does:
 #   1. Detects instance IDs automatically
 #   2. Waits for SSM Online on all 3 instances
-#   3. Installs Ansible on the controller
-#   4. Generates SSH key on the controller
-#   5. Distributes the public key to web & monitoring
-#   6. Copies all ansible + grafana files to the controller
-#   7. Installs geerlingguy.docker role + community.docker collection
-#   8. Runs playbook-connectivity.yaml (connectivity test)
+#   3. Generates SSH key on the controller
+#   4. Distributes the public key to web & monitoring
+#   5. Copies all ansible + grafana files to the controller
+#   6. Accepts SSH host keys on controller
+#   7. Runs playbook-connectivity.yaml (connectivity test)
+#   8. Installs geerlingguy.docker role + community.docker collection
 #   9. Runs playbook-docker.yaml (install Docker on web & monitoring)
-#  10. Installs prometheus.prometheus.node_exporter role
+#  10. Installs prometheus.prometheus collection
 #  11. Runs playbook-node-exporter.yaml (install node_exporter on web)
-#  12. Runs playbook-monitoring.yaml (deploy Prometheus + Grafana stack)
+#  12. Runs playbook-monitoring.yaml (deploy Prometheus + Grafana)
+#  13. Retrieves tunnel token and installs Cloudflare Tunnel on monitoring
+#  14. Runs playbook-web.yaml (deploy app container from existing ECR image)
+#
+# Package installs (Ansible, Docker, AWS CLI, cloudflared) are handled by
+# user_data scripts in terraform/ — no waiting for apt-get here.
 #
 # On re-deploy (terraform destroy + apply), just run this script again.
 # ==============================================================================
@@ -37,23 +42,11 @@ echo ""
 echo "=== Waiting for SSM Online on all instances ==="
 while true; do
   STATUS=$(aws ssm describe-instance-information --region $REGION --filters "Key=InstanceIds,Values=$CTRL_ID,$WEB_ID,$MON_ID" --query 'InstanceInformationList[].PingStatus' --output text)
-  if echo "$STATUS" | grep -q "Online" && [ "$(echo "$STATUS" | grep -c Online)" -eq 3 ]; then
+  if echo "$STATUS" | grep -q "Online" && [ "$(echo "$STATUS" | grep -o Online | wc -l)" -eq 3 ]; then
     echo "  All instances Online"
     break
   fi
   echo "  Waiting... (status: $STATUS)"
-  sleep 10
-done
-
-echo ""
-echo "=== Installing Ansible on controller ==="
-CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo apt-get update -y","sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ansible"]' --query 'Command.CommandId' --output text)
-echo "  Command ID: $CMD_ID"
-while true; do
-  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
-  echo "  Status: $STATUS"
-  [ "$STATUS" = "Success" ] && break
-  [ "$STATUS" = "Failed" ] && echo "  ERROR: install failed" && exit 1
   sleep 10
 done
 
@@ -101,6 +94,25 @@ while true; do
 done
 
 echo ""
+echo "=== Fetching private IPs for SSH host key scan ==="
+WEB_IP=$(aws ec2 describe-instances --region $REGION --instance-ids "$WEB_ID" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
+MON_IP=$(aws ec2 describe-instances --region $REGION --instance-ids "$MON_ID" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
+echo "  Web IP:        $WEB_IP"
+echo "  Monitoring IP: $MON_IP"
+
+echo ""
+echo "=== Accepting SSH host keys on controller ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu ssh-keyscan -H $WEB_IP $MON_IP >> /home/ubuntu/.ssh/known_hosts 2>/dev/null\"]" --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: ssh-keyscan failed" && exit 1
+  sleep 5
+done
+
+echo ""
 echo "=== Running connectivity playbook ==="
 CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-connectivity.yaml"]' --query 'Command.CommandId' --output text)
 echo "  Command ID: $CMD_ID"
@@ -130,7 +142,7 @@ echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
 
 echo ""
 echo "=== Installing prometheus.prometheus.node_exporter role ==="
-CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-galaxy role install prometheus.prometheus.node_exporter"]' --query 'Command.CommandId' --output text)
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-galaxy collection install prometheus.prometheus"]' --query 'Command.CommandId' --output text)
 echo "  Command ID: $CMD_ID"
 while true; do
   STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
@@ -157,4 +169,30 @@ RESULT=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" 
 echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
 
 echo ""
+echo "=== Fetching tunnel token from SSM Parameter Store ==="
+TUNNEL_TOKEN=$(aws ssm get-parameter --name /devops-bootcamp-2026/tunnel-token --with-decryption --region $REGION --query Parameter.Value --output text)
+echo "  Token retrieved"
+
+echo ""
+echo "=== Installing Cloudflare Tunnel service ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$MON_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo cloudflared service install $TUNNEL_TOKEN\"]" --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$MON_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: tunnel install failed" && exit 1
+  sleep 5
+done
+
+echo ""
+echo "=== Deploying app container (playbook-web.yaml) ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["sudo -u ubuntu ansible-playbook -i /home/ubuntu/ansible/inventory.ini /home/ubuntu/ansible/playbook-web.yaml"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+sleep 15
+RESULT=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query '{Status:Status,Output:StandardOutputContent}' --output json)
+echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
+
+echo ""
 echo "=== DONE ==="
+echo "App should be live at: http://$(aws ec2 describe-instances --region $REGION --instance-ids "$WEB_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)"

@@ -28,7 +28,7 @@ module "web_server" {
   private_ip             = "10.0.0.5"
   vpc_security_group_ids = [module.sg_public.id]
   iam_instance_profile   = data.aws_iam_instance_profile.ssm.name
-  user_data              = file("userdata.sh")
+  user_data              = file("userdata-web.sh")
 
   tags = { Name = "devops-web-server" }
 }
@@ -49,6 +49,7 @@ module "ansible_controller" {
   private_ip             = "10.0.0.135"
   vpc_security_group_ids = [module.sg_private.id]
   iam_instance_profile   = data.aws_iam_instance_profile.ssm.name
+  user_data              = file("userdata-controller.sh")
 
   tags = { Name = "devops-ansible-controller" }
 }
@@ -64,6 +65,7 @@ module "monitoring_server" {
   private_ip             = "10.0.0.136"
   vpc_security_group_ids = [module.sg_private.id]
   iam_instance_profile   = data.aws_iam_instance_profile.ssm.name
+  user_data              = file("userdata-monitoring.sh")
 
   tags = { Name = "devops-monitoring-server" }
 }

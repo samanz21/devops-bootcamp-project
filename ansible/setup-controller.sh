@@ -8,18 +8,21 @@
 # What it does:
 #   1. Detects instance IDs automatically
 #   2. Waits for SSM Online on all 3 instances
-#   3. Generates SSH key on the controller
-#   4. Distributes the public key to web & monitoring
-#   5. Copies all ansible + grafana files to the controller
-#   6. Accepts SSH host keys on controller
-#   7. Runs playbook-connectivity.yaml (connectivity test)
-#   8. Installs geerlingguy.docker role + community.docker collection
-#   9. Runs playbook-docker.yaml (install Docker on web & monitoring)
-#  10. Installs prometheus.prometheus collection
-#  11. Runs playbook-node-exporter.yaml (install node_exporter on web)
-#  12. Runs playbook-monitoring.yaml (deploy Prometheus + Grafana)
-#  13. Retrieves tunnel token and installs Cloudflare Tunnel on monitoring
-#  14. Runs playbook-web.yaml (deploy app container from existing ECR image)
+#   3. Waits for cloud-init to finish on all 3 instances
+#   4. Self-heals Ansible on the controller (installs pip/ansible/awscli
+#      via SSM if user_data failed — e.g. transient apt mirror errors)
+#   5. Generates SSH key on the controller
+#   6. Distributes the public key to web & monitoring
+#   7. Copies all ansible + grafana files to the controller
+#   8. Accepts SSH host keys on controller
+#   9. Runs playbook-connectivity.yaml (connectivity test)
+#  10. Installs geerlingguy.docker role + community.docker collection
+#  11. Runs playbook-docker.yaml (install Docker on web & monitoring)
+#  12. Installs prometheus.prometheus collection
+#  13. Runs playbook-node-exporter.yaml (install node_exporter on web)
+#  14. Runs playbook-monitoring.yaml (deploy Prometheus + Grafana)
+#  15. Retrieves tunnel token and installs Cloudflare Tunnel on monitoring
+#  16. Runs playbook-web.yaml (deploy app container from existing ECR image)
 #
 # Package installs (Ansible, Docker, AWS CLI, cloudflared) are handled by
 # user_data scripts in terraform/ — no waiting for apt-get here.
@@ -31,22 +34,61 @@ set -e
 
 REGION="ap-southeast-1"
 echo "=== Getting instance IDs ==="
-CTRL_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-ansible-controller" --query 'Reservations[0].Instances[0].InstanceId' --output text)
-WEB_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-web-server" --query 'Reservations[0].Instances[0].InstanceId' --output text)
-MON_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-monitoring-server" --query 'Reservations[0].Instances[0].InstanceId' --output text)
+CTRL_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-ansible-controller" "Name=instance-state-name,Values=running" --query 'Reservations[0].Instances[0].InstanceId' --output text)
+WEB_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-web-server" "Name=instance-state-name,Values=running" --query 'Reservations[0].Instances[0].InstanceId' --output text)
+MON_ID=$(aws ec2 describe-instances --region $REGION --filters "Name=tag:Name,Values=devops-monitoring-server" "Name=instance-state-name,Values=running" --query 'Reservations[0].Instances[0].InstanceId' --output text)
 echo "  Controller: $CTRL_ID"
 echo "  Web:        $WEB_ID"
 echo "  Monitoring: $MON_ID"
 
 echo ""
 echo "=== Waiting for SSM Online on all instances ==="
+MAX_RETRIES=60  # 10 minutes max (60 * 10s)
+RETRY=0
 while true; do
-  STATUS=$(aws ssm describe-instance-information --region $REGION --filters "Key=InstanceIds,Values=$CTRL_ID,$WEB_ID,$MON_ID" --query 'InstanceInformationList[].PingStatus' --output text)
-  if echo "$STATUS" | grep -q "Online" && [ "$(echo "$STATUS" | grep -o Online | wc -l)" -eq 3 ]; then
+  if [ $RETRY -ge $MAX_RETRIES ]; then
+    echo "  ERROR: timeout waiting for SSM Online after $((MAX_RETRIES * 10)) seconds"
+    echo "  Check that instances exist and have the EC2-SSM-Role IAM profile attached."
+    echo "  Also check for terminated instances with the same tags in EC2 console."
+    exit 1
+  fi
+
+  CTRL_STATUS=$(aws ssm describe-instance-information --region $REGION --filters "Key=InstanceIds,Values=$CTRL_ID" --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "not found")
+  WEB_STATUS=$(aws ssm describe-instance-information --region $REGION --filters "Key=InstanceIds,Values=$WEB_ID" --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "not found")
+  MON_STATUS=$(aws ssm describe-instance-information --region $REGION --filters "Key=InstanceIds,Values=$MON_ID" --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "not found")
+
+  echo "  Controller: $CTRL_STATUS | Web: $WEB_STATUS | Monitoring: $MON_STATUS"
+
+  if [ "$CTRL_STATUS" = "Online" ] && [ "$WEB_STATUS" = "Online" ] && [ "$MON_STATUS" = "Online" ]; then
     echo "  All instances Online"
     break
   fi
-  echo "  Waiting... (status: $STATUS)"
+
+  RETRY=$((RETRY + 1))
+  sleep 10
+done
+
+echo ""
+echo "=== Waiting for cloud-init to finish on all instances ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" "$WEB_ID" "$MON_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["cloud-init status --wait"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: cloud-init failed on an instance" && exit 1
+  sleep 10
+done
+
+echo ""
+echo "=== Ensuring Ansible is installed on controller (self-heal) ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["command -v ansible-playbook >/dev/null 2>&1 && echo ANSIBLE_OK || (apt-get update -y || (sleep 10 && apt-get update -y)) && apt-get install -y python3-pip python3-venv && python3 -m pip install ansible awscli --break-system-packages && echo ANSIBLE_INSTALLED"]' --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: ansible bootstrap failed on controller" && exit 1
   sleep 10
 done
 
@@ -81,15 +123,29 @@ WEB_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-web.yaml")
 REQ_B64=$(base64 -w0 "$SCRIPT_DIR/requirements.yml")
 MON_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-monitoring.yaml")
 NEXP_B64=$(base64 -w0 "$SCRIPT_DIR/playbook-node-exporter.yaml")
-COMPOSE_B64=$(base64 -w0 "$SCRIPT_DIR/compose.yaml")
+COMPOSE_B64=$(base64 -w0 "$SCRIPT_DIR/grafana/compose.yaml")
 PROM_B64=$(base64 -w0 "$SCRIPT_DIR/prometheus.yaml")
-CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu mkdir -p /home/ubuntu/ansible/grafana\",\"echo $INV_B64 | base64 -d > /home/ubuntu/ansible/inventory.ini\",\"echo $CFG_B64 | base64 -d > /home/ubuntu/ansible/ansible.cfg\",\"echo $CONN_B64 | base64 -d > /home/ubuntu/ansible/playbook-connectivity.yaml\",\"echo $DOCKER_B64 | base64 -d > /home/ubuntu/ansible/playbook-docker.yaml\",\"echo $WEB_B64 | base64 -d > /home/ubuntu/ansible/playbook-web.yaml\",\"echo $REQ_B64 | base64 -d > /home/ubuntu/ansible/requirements.yml\",\"echo $MON_B64 | base64 -d > /home/ubuntu/ansible/playbook-monitoring.yaml\",\"echo $NEXP_B64 | base64 -d > /home/ubuntu/ansible/playbook-node-exporter.yaml\",\"echo $COMPOSE_B64 | base64 -d > /home/ubuntu/ansible/grafana/compose.yaml\",\"echo $PROM_B64 | base64 -d > /home/ubuntu/ansible/grafana/prometheus.yaml\",\"chown -R ubuntu:ubuntu /home/ubuntu/ansible\"]" --query 'Command.CommandId' --output text)
+DS_B64=$(base64 -w0 "$SCRIPT_DIR/grafana/provisioning/datasources/datasource.yaml")
+DP_B64=$(base64 -w0 "$SCRIPT_DIR/grafana/provisioning/dashboards/dashboard-provider.yaml")
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu mkdir -p /home/ubuntu/ansible/grafana/provisioning/datasources\",\"sudo -u ubuntu mkdir -p /home/ubuntu/ansible/grafana/provisioning/dashboards\",\"echo $INV_B64 | base64 -d > /home/ubuntu/ansible/inventory.ini\",\"echo $CFG_B64 | base64 -d > /home/ubuntu/ansible/ansible.cfg\",\"echo $CONN_B64 | base64 -d > /home/ubuntu/ansible/playbook-connectivity.yaml\",\"echo $DOCKER_B64 | base64 -d > /home/ubuntu/ansible/playbook-docker.yaml\",\"echo $WEB_B64 | base64 -d > /home/ubuntu/ansible/playbook-web.yaml\",\"echo $REQ_B64 | base64 -d > /home/ubuntu/ansible/requirements.yml\",\"echo $MON_B64 | base64 -d > /home/ubuntu/ansible/playbook-monitoring.yaml\",\"echo $NEXP_B64 | base64 -d > /home/ubuntu/ansible/playbook-node-exporter.yaml\",\"echo $COMPOSE_B64 | base64 -d > /home/ubuntu/ansible/grafana/compose.yaml\",\"echo $PROM_B64 | base64 -d > /home/ubuntu/ansible/grafana/prometheus.yaml\",\"echo $DS_B64 | base64 -d > /home/ubuntu/ansible/grafana/provisioning/datasources/datasource.yaml\",\"echo $DP_B64 | base64 -d > /home/ubuntu/ansible/grafana/provisioning/dashboards/dashboard-provider.yaml\",\"chown -R ubuntu:ubuntu /home/ubuntu/ansible\"]" --query 'Command.CommandId' --output text)
 echo "  Command ID: $CMD_ID"
 while true; do
   STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
   echo "  Status: $STATUS"
   [ "$STATUS" = "Success" ] && break
   [ "$STATUS" = "Failed" ] && echo "  ERROR: file copy failed" && exit 1
+  sleep 5
+done
+
+echo ""
+echo "=== Downloading Node Exporter Full dashboard on controller ==="
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$CTRL_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo -u ubuntu curl -sL 'https://grafana.com/api/dashboards/1860/revisions/latest/download' -o /home/ubuntu/ansible/grafana/provisioning/dashboards/node-exporter-full.json\",\"chown ubuntu:ubuntu /home/ubuntu/ansible/grafana/provisioning/dashboards/node-exporter-full.json\",\"ls -la /home/ubuntu/ansible/grafana/provisioning/dashboards/\"]" --query 'Command.CommandId' --output text)
+echo "  Command ID: $CMD_ID"
+while true; do
+  STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$CTRL_ID" --query 'Status' --output text)
+  echo "  Status: $STATUS"
+  [ "$STATUS" = "Success" ] && break
+  [ "$STATUS" = "Failed" ] && echo "  ERROR: dashboard download failed" && exit 1
   sleep 5
 done
 
@@ -175,7 +231,7 @@ echo "  Token retrieved"
 
 echo ""
 echo "=== Installing Cloudflare Tunnel service ==="
-CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$MON_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo cloudflared service install $TUNNEL_TOKEN\"]" --query 'Command.CommandId' --output text)
+CMD_ID=$(aws ssm send-command --region $REGION --instance-ids "$MON_ID" --document-name "AWS-RunShellScript" --parameters "commands=[\"sudo cloudflared service uninstall >/dev/null 2>&1; sudo cloudflared service install $TUNNEL_TOKEN\"]" --query 'Command.CommandId' --output text)
 echo "  Command ID: $CMD_ID"
 while true; do
   STATUS=$(aws ssm get-command-invocation --region $REGION --command-id "$CMD_ID" --instance-id "$MON_ID" --query 'Status' --output text)

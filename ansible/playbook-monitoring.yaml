@@ -17,6 +17,34 @@
         src: grafana/compose.yaml
         dest: /opt/monitoring/compose.yaml
 
+    - name: Create provisioning directories
+      file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - /opt/monitoring/provisioning/datasources
+        - /opt/monitoring/provisioning/dashboards
+
+    - name: Copy datasource config
+      copy:
+        src: grafana/provisioning/datasources/datasource.yaml
+        dest: /opt/monitoring/provisioning/datasources/datasource.yaml
+
+    - name: Remove stale datasource file from old naming
+      file:
+        path: /opt/monitoring/provisioning/datasources/prometheus.yaml
+        state: absent
+
+    - name: Copy dashboard provider config
+      copy:
+        src: grafana/provisioning/dashboards/dashboard-provider.yaml
+        dest: /opt/monitoring/provisioning/dashboards/dashboard-provider.yaml
+
+    - name: Copy Node Exporter Full dashboard
+      copy:
+        src: grafana/provisioning/dashboards/node-exporter-full.json
+        dest: /opt/monitoring/provisioning/dashboards/node-exporter-full.json
+
     - name: Start monitoring stack
       command: docker compose up -d
       args:

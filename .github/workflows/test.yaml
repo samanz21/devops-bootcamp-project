@@ -1,0 +1,85 @@
+name: test
+
+# Run on every push to any branch
+on:
+  push:
+    branches: ["**"]
+
+# Cancel an older run of the same branch when a new push arrives
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Detect which folders changed, so each check only runs when its files changed
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      terraform: ${{ steps.filter.outputs.terraform }}
+      ansible: ${{ steps.filter.outputs.ansible }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+  # Check Terraform formatting and syntax (no AWS credentials needed)
+  terraform:
+              - 'terraform/**'
+  # Syntax-check Ansible playbooks (no servers are contacted)
+  ansible:
+              - 'ansible/**'
+
+  terraform:
+    name: Terraform syntax check
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+  ansible:
+    name: Ansible syntax check
+    needs: changes
+    if: needs.changes.outputs.ansible == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ansible
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ansible
+        run: pipx install ansible-core
+
+      - name: Install roles and collections
+        run: |
+          ansible-galaxy role install -r requirements.yml
+          ansible-galaxy collection install community.docker prometheus.prometheus
+
+      - name: Syntax check playbooks
+        run: |
+          set -euo pipefail
+          for playbook in playbook-*.yaml; do
+            echo "::group::ansible-playbook --syntax-check $playbook"
+            ansible-playbook --syntax-check "$playbook"
+            echo "::endgroup::"
+          done

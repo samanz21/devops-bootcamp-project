@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DevOps Bootcamp 2026 — Final Project</title>
+<meta name="description" content="One system, twelve tools — Terraform, Ansible, Docker, ECR, Prometheus, Grafana, Cloudflare, AWS, and CI/CD on a 3-server AWS fleet.">
+<style>
+  :root {
+    --bg: #020617;
+    --panel: rgba(15, 23, 42, 0.55);
+    --panel-border: #1e293b;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-strong: #0ea5e9;
+    --code-bg: #0f172a;
+    --grid: rgba(30, 41, 59, 0.35);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 44px 44px;
+    color: var(--text);
+    font: 16px/1.65 ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 20px 64px; }
+  .eyebrow { color: var(--muted); letter-spacing: 0.18em; text-transform: uppercase; font-size: 12px; margin: 26px 0 6px; }
+  h1 { font-size: 30px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); margin: 0 0 20px; }
+  .hero {
+    border: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, rgba(14, 165, 233, 0.10), rgba(15, 23, 42, 0.35));
+    border-radius: 14px;
+    padding: 22px;
+    margin: 0 0 26px;
+  }
+  .hero h2 { margin: 0 0 6px; font-size: 20px; }
+  .hero p { margin: 0 0 16px; color: var(--muted); }
+  .btn {
+    display: inline-block;
+    padding: 10px 18px;
+    border-radius: 10px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 14px;
+    margin: 0 10px 10px 0;
+    border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--accent-strong); color: #04121f; }
+  .btn-primary:hover { background: var(--accent); }
+  .btn-ghost { border-color: var(--panel-border); color: var(--text); background: var(--panel); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .teaser { display: block; margin: 6px 0 2px; border-radius: 12px; overflow: hidden; border: 1px solid var(--panel-border); }
+  .teaser img { display: block; width: 100%; height: auto; }
+  .teaser figcaption { color: var(--muted); font-size: 13px; padding: 8px 2px 0; }
+  article h2 { font-size: 21px; margin: 34px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--panel-border); }
+  article h3 { font-size: 17px; margin: 24px 0 8px; }
+  article p { margin: 10px 0; }
+  article a { color: var(--accent); }
+  article code {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 1px 6px;
+    font: 13px/1.5 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  article pre {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    overflow-x: auto;
+  }
+  article pre code { background: none; border: none; padding: 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  article th, article td { border: 1px solid var(--panel-border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  article th { background: rgba(14, 165, 233, 0.08); color: var(--text); }
+  article td { color: var(--muted); }
+  article td strong, article th strong { color: var(--text); }
+  article ul, article ol { margin: 10px 0; padding-left: 24px; }
+  article li { margin: 4px 0; }
+  article blockquote { border-left: 3px solid var(--accent); margin: 12px 0; padding: 2px 16px; color: var(--muted); }
+  footer { border-top: 1px solid var(--panel-border); margin-top: 40px; padding-top: 16px; color: var(--muted); font-size: 13px; }
+  footer a { color: var(--accent); }
+  .lightbox { position: fixed; inset: 0; z-index: 9999; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: rgba(2, 6, 23, 0.9); backdrop-filter: blur(8px); padding: 28px; }
+  .lightbox.open { display: flex; }
+  .lightbox img { max-width: 100%; max-height: 80vh; border-radius: 12px; border: 1px solid var(--panel-border); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6); }
+  .lightbox-close { position: absolute; top: 16px; right: 20px; width: 42px; height: 42px; border-radius: 50%; border: 1px solid rgba(148, 163, 184, 0.35); background: rgba(15, 23, 42, 0.85); color: var(--text); font-size: 20px; line-height: 1; cursor: pointer; }
+  .lightbox-close:hover { border-color: var(--accent); color: var(--accent); }
+  .lightbox-bar { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .lightbox-bar .btn { margin: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">DevOps Bootcamp 2026 · Final Project</p>
+  <h1>One system, twelve tools</h1>
+  <p class="tagline">Terraform · Ansible · Docker · ECR · Prometheus · Grafana · Cloudflare · AWS (SSM) · Git · GitHub · Linux · CI/CD</p>
+
+  <div class="hero">
+    <h2>Interactive Architecture</h2>
+    <p>Explore the full fleet — VPC, subnets, the three EC2 servers, Cloudflare endpoints, S3 state bucket, and every port — as a self-contained, explorable diagram. Search nodes, trace routes, switch dark/light, export PNG.</p>
+    <a class="btn btn-primary" href="architecture.html">Open interactive diagram →</a>
+    <a class="btn btn-ghost" href="https://github.com/samanz21/devops-bootcamp-project">View repository</a>
+    <a class="btn btn-ghost" href="architecture.jpg" onclick="openLightbox();return false;">Static image (JPEG)</a>
+  </div>
+
+  <figure class="teaser">
+    <a href="architecture.jpg" onclick="openLightbox();return false;"><img src="architecture.jpg" alt="AWS fleet architecture diagram" loading="lazy"></a>
+    <figcaption>Static preview — click to enlarge · or open the <a href="architecture.html">interactive diagram</a>.</figcaption>
+  </figure>
+
+  <article>
+<h2>Live Links</h2>
+<table>
+<thead>
+<tr>
+<th>Service</th>
+<th>URL</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Docs site (GitHub Pages)</td>
+<td><a href="https://samanz21.github.io/devops-bootcamp-project/">https://samanz21.github.io/devops-bootcamp-project/</a></td>
+<td><code>docs/index.html</code> — README + interactive architecture diagram</td>
+</tr>
+<tr>
+<td>Web app (Ship)</td>
+<td><a href="https://web.luqmansyakir.com">https://web.luqmansyakir.com</a></td>
+<td>Cloudflare (proxied A record) → EIP → nginx container</td>
+</tr>
+<tr>
+<td>Grafana</td>
+<td><a href="https://monitoring.luqmansyakir.com">https://monitoring.luqmansyakir.com</a></td>
+<td>Cloudflare Tunnel → Grafana container</td>
+</tr>
+</tbody></table>
+<p>Grafana ships with a pre-provisioned <strong>Node Exporter Full</strong> dashboard and Prometheus datasource — no manual setup.</p>
+<h2>Architecture</h2>
+<p>Region: <code>ap-southeast-1</code> · VPC <code>10.0.0.0/24</code> · public subnet <code>10.0.0.0/25</code> (IGW) · private subnet <code>10.0.0.128/25</code> (NAT)</p>
+<table>
+<thead>
+<tr>
+<th>Server</th>
+<th>Private IP</th>
+<th>Subnet</th>
+<th>Role</th>
+<th>Access</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>web</strong></td>
+<td><code>10.0.0.5</code></td>
+<td>public + EIP</td>
+<td>Ship app container (port 80) + node_exporter</td>
+<td>SSM</td>
+</tr>
+<tr>
+<td><strong>ansible-controller</strong></td>
+<td><code>10.0.0.135</code></td>
+<td>private</td>
+<td>Runs all playbooks against the other two</td>
+<td>SSM</td>
+</tr>
+<tr>
+<td><strong>monitoring</strong></td>
+<td><code>10.0.0.136</code></td>
+<td>private</td>
+<td>Prometheus (9090) + Grafana (3000) + cloudflared</td>
+<td>SSM</td>
+</tr>
+</tbody></table>
+<p>All three use the same pinned private IPs (fixed in <code>terraform/ec2.tf</code>), so they survive destroy/redeploy. No SSH from the internet — everything goes through AWS SSM.</p>
+<h3>What is set up on each EC2</h3>
+<table>
+<thead>
+<tr>
+<th>Server</th>
+<th>user_data installs</th>
+<th>Ansible adds on top</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>web</strong></td>
+<td>Docker, python3-pip</td>
+<td>app container from ECR (port 80), node_exporter</td>
+</tr>
+<tr>
+<td><strong>controller</strong></td>
+<td>python3-pip, Ansible, AWS CLI, Docker</td>
+<td>everything below via <code>setup-controller.sh</code></td>
+</tr>
+<tr>
+<td><strong>monitoring</strong></td>
+<td>Docker, cloudflared</td>
+<td>Prometheus + Grafana compose stack, Cloudflare Tunnel service</td>
+</tr>
+</tbody></table>
+<h2>Automation — <code>ansible/setup-controller.sh</code></h2>
+<p>One command (<code>bash setup-controller.sh</code>) configures the whole fleet from the laptop through SSM. What it does, in order:</p>
+<ol>
+<li>Detects the 3 instance IDs by tag</li>
+<li>Waits for SSM <code>Online</code> + cloud-init to finish on all</li>
+<li>Self-heals Ansible on the controller if user_data failed</li>
+<li>Generates an SSH key on the controller and distributes it to web + monitoring</li>
+<li>Copies all playbooks, inventory, and Grafana provisioning files to the controller (base64 over SSM)</li>
+<li>Accepts SSH host keys, runs a connectivity test playbook</li>
+<li>Installs <code>geerlingguy.docker</code> role + <code>community.docker</code> collection → runs Docker install on web + monitoring</li>
+<li>Installs node_exporter on web (<code>prometheus.prometheus</code> collection)</li>
+<li>Deploys Prometheus + Grafana compose stack with provisioned datasource + dashboard</li>
+<li>Pulls the Cloudflare Tunnel token from SSM Parameter Store and installs the tunnel service on monitoring</li>
+<li>Deploys the app: pulls the image from ECR and runs the container on web port 80</li>
+</ol>
+<p>Re-running it after any redeploy is safe — every step is idempotent.</p>
+<h2>Repo Layout</h2>
+<pre><code>terraform/        # VPC, subnets, IGW/NAT, SGs, 3 EC2, EIP, S3 backend
+├── dns.tf        # Cloudflare DNS record auto-updated to the current EIP on apply
+├── ec2.tf        # 3 instances, pinned private IPs
+└── userdata-*.sh # per-server bootstrap scripts
+ansible/          # controller-side configuration management
+├── setup-controller.sh   # the one-command fleet setup (above)
+├── playbook-*.yaml       # connectivity, docker, node_exporter, monitoring, web app
+├── inventory.ini.tftpl   # generated from Terraform outputs
+└── grafana/              # compose + Prometheus config + provisioned dashboards
+app/              # Ship app (multi-stage Dockerfile) → ECR
+</code></pre>
+<h2>Deploy From Scratch</h2>
+<pre><code class="language-bash">cd terraform &amp;&amp; terraform init &amp;&amp; terraform apply   # infra + DNS record (auto new EIP)
+cd ../ansible  &amp;&amp; terraform init &amp;&amp; terraform apply # generate inventory
+bash setup-controller.sh                            # configure everything (~15 min)
+</code></pre>
+<p>After <code>destroy</code> + <code>apply</code>, only these three steps again — the Cloudflare record repoints to the new EIP automatically (<code>terraform/dns.tf</code>), and no manual DNS edits are ever needed.</p>
+<h2>Monitoring Chain</h2>
+<pre><code>node_exporter (web 10.0.0.5:9100) → Prometheus (10.0.0.136:9090) → Grafana dashboard
+</code></pre>
+<p>Scrape interval 15s. Targets: web node_exporter + Prometheus itself.</p>
+<h2>Security Notes</h2>
+<ul>
+<li>Port 22 reachable only inside the VPC (controller → targets); internet access is SSM-only</li>
+<li>Cloudflare token and tunnel token stored in AWS SSM Parameter Store, never in the repo</li>
+<li>Grafana exposed only through the Cloudflare Tunnel; Prometheus/Grafana ports are VPC-internal</li>
+</ul>
+
+  </article>
+
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="Architecture image preview">
+    <button class="lightbox-close" onclick="closeLightbox()" aria-label="Close preview">✕</button>
+    <img src="architecture.jpg" alt="AWS fleet architecture diagram">
+    <div class="lightbox-bar">
+      <a class="btn btn-primary" href="architecture.html">Open interactive diagram →</a>
+      <a class="btn btn-ghost" href="index.html" onclick="closeLightbox()">← Back to overview</a>
+    </div>
+  </div>
+
+  <footer>
+    Built with Terraform + Ansible · Diagrams generated with
+    <a href="https://github.com/tt-a1i/archify">Archify</a> ·
+    <a href="https://github.com/samanz21/devops-bootcamp-project">source on GitHub</a>
+  </footer>
+</div>
+<script>
+  var lb = document.getElementById('lightbox');
+  function openLightbox() { lb.classList.add('open'); document.body.style.overflow = 'hidden'; }
+  function closeLightbox() { lb.classList.remove('open'); document.body.style.overflow = ''; }
+  lb.addEventListener('click', function (e) { if (e.target === lb) closeLightbox(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeLightbox(); });
+</script>
+</body>
+</html>

@@ -25,13 +25,12 @@ jobs:
         id: filter
         with:
           filters: |
-  # Check Terraform formatting and syntax (no AWS credentials needed)
-  terraform:
+            terraform:
               - 'terraform/**'
-  # Syntax-check Ansible playbooks (no servers are contacted)
-  ansible:
+            ansible:
               - 'ansible/**'
 
+  # Check Terraform formatting and syntax (no AWS credentials needed)
   terraform:
     name: Terraform syntax check
     needs: changes
@@ -56,6 +55,7 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
+  # Syntax-check Ansible playbooks (no servers are contacted)
   ansible:
     name: Ansible syntax check
     needs: changes

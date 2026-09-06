@@ -29,6 +29,8 @@ jobs:
               - 'terraform/**'
             ansible:
               - 'ansible/**'
+            markdown:
+              - 'README.md'
 
   # Check Terraform formatting and syntax (no AWS credentials needed)
   terraform:
@@ -83,3 +85,15 @@ jobs:
             ansible-playbook --syntax-check "$playbook"
             echo "::endgroup::"
           done
+
+  # Basic markdown lint for the README
+  markdown:
+    name: Markdown syntax check
+    needs: changes
+    if: needs.changes.outputs.markdown == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint README
+        run: npx -y markdownlint-cli --disable MD013 MD034 MD060 MD033 MD040 MD036 -- README.md

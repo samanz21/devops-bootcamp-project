@@ -9,6 +9,7 @@ A 3-server setup on AWS where infrastructure is provisioned by Terraform, config
 | Service | URL | Path |
 |---|---|---|
 | Docs site (GitHub Pages) | https://samanz21.github.io/devops-bootcamp-project/ | `docs/index.html` — README + interactive architecture diagram |
+| Docs site (Cloudflare Workers) | https://docs.luqmansyakir.com | Same docs, served through Cloudflare Workers |
 | Web app (Ship) | https://web.luqmansyakir.com | Cloudflare (proxied A record) → EIP → nginx container |
 | Grafana | https://monitoring.luqmansyakir.com | Cloudflare Tunnel → Grafana container |
 
